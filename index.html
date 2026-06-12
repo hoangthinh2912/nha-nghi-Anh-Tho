@@ -726,6 +726,11 @@ footer{
 				<h3>Gợi ý nhanh</h3>
 				<p id="stayHint">Gói tiêu chuẩn phù hợp cho khách cần một nơi nghỉ ngơi tiện lợi và tiết kiệm.</p>
 			</div>
+			<div class="mini-card">
+				<h3>Dữ liệu đặt phòng</h3>
+				<p id="bookingCount">Chưa có bản ghi nào được lưu.</p>
+				<ul id="bookingRecords"></ul>
+			</div>
 		</div>
 	</div>
 </section>
@@ -880,6 +885,40 @@ const reviews = [
 	}
 ];
 
+const bookingStorageKey = "anhtho_booking_records";
+
+function loadBookingRecords(){
+	try{
+		const raw = localStorage.getItem(bookingStorageKey);
+		const records = raw ? JSON.parse(raw) : [];
+		return Array.isArray(records) ? records : [];
+	}catch(error){
+		return [];
+	}
+}
+
+function saveBookingRecords(records){
+	localStorage.setItem(bookingStorageKey, JSON.stringify(records));
+}
+
+function formatBookingSummary(record){
+	return `${record.name} - ${record.room} - ${record.total.toLocaleString("vi-VN")} đ`;
+}
+
+function renderBookingRecords(){
+	const records = loadBookingRecords();
+	const bookingCount = document.getElementById("bookingCount");
+	const bookingRecords = document.getElementById("bookingRecords");
+
+	bookingCount.textContent = records.length
+		? `Đã lưu ${records.length} bản ghi đặt phòng trong trình duyệt này.`
+		: "Chưa có bản ghi nào được lưu.";
+
+	bookingRecords.innerHTML = records.length
+		? records.slice(0, 5).map((record) => `<li>${formatBookingSummary(record)}</li>`).join("")
+		: "<li>Danh sách sẽ hiển thị sau khi khách xác nhận đặt phòng.</li>";
+}
+
 const statsContainer = document.getElementById("stats");
 statsContainer.innerHTML = stats.map((item) => `
 	<div class="stat">
@@ -950,7 +989,7 @@ function calculatePrice(){
 	const checkout = document.getElementById("checkoutDate").value;
 
 	if(!room || !checkin || !checkout){
-		return;
+		return null;
 	}
 
 	const start = new Date(checkin);
@@ -958,13 +997,14 @@ function calculatePrice(){
 
 	if(end <= start){
 		document.getElementById("totalPrice").textContent = "Ngày trả phải lớn hơn ngày nhận";
-		return;
+		return null;
 	}
 
 	const days = Math.ceil((end - start) / (1000 * 60 * 60 * 24));
 	const total = days * roomPrices[room];
 
 	document.getElementById("totalPrice").textContent = `Tổng tiền: ${total.toLocaleString("vi-VN")} đ (${days} đêm)`;
+	return { days, total };
 }
 
 function updateStayNote(){
@@ -998,6 +1038,29 @@ function submitBooking(){
 		return;
 	}
 
+	const bookingPrice = calculatePrice();
+
+	if(!bookingPrice){
+		alert("Vui lòng kiểm tra lại ngày nhận và ngày trả phòng.");
+		return;
+	}
+
+	const records = loadBookingRecords();
+	records.unshift({
+		room,
+		name,
+		phone,
+		checkin,
+		checkout,
+		stayType,
+		note,
+		total: bookingPrice.total,
+		days: bookingPrice.days,
+		createdAt: new Date().toISOString()
+	});
+	saveBookingRecords(records.slice(0, 20));
+	renderBookingRecords();
+
 	alert(
 		"ĐẶT PHÒNG THÀNH CÔNG!\n\n" +
 		"Khách hàng: " + name + "\n" +
@@ -1006,10 +1069,12 @@ function submitBooking(){
 		"Loại lưu trú: " + stayType + "\n" +
 		"Ngày nhận: " + checkin + "\n" +
 		"Ngày trả: " + checkout + "\n" +
-		"Ghi chú: " + note
+		"Ghi chú: " + note + "\n" +
+		"Tổng tiền: " + bookingPrice.total.toLocaleString("vi-VN") + " đ"
 	);
 }
 
+renderBookingRecords();
 updateStayNote();
 </script>
 
