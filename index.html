@@ -306,6 +306,15 @@ nav a:hover{
 	padding:22px;
 }
 
+.room-meta{
+	display:flex;
+	justify-content:space-between;
+	align-items:center;
+	gap:12px;
+	flex-wrap:wrap;
+	margin-bottom:12px;
+}
+
 .pill{
 	display:inline-block;
 	background:#fef3c7;
@@ -315,6 +324,28 @@ nav a:hover{
 	padding:7px 12px;
 	border-radius:999px;
 	margin-bottom:12px;
+}
+
+.room-stock{
+	display:inline-flex;
+	align-items:center;
+	justify-content:center;
+	padding:7px 12px;
+	border-radius:999px;
+	background:#ecfeff;
+	color:#155e75;
+	font-size:13px;
+	font-weight:900;
+}
+
+.room-stock.low{
+	background:#fef3c7;
+	color:#92400e;
+}
+
+.room-stock.empty{
+	background:#fee2e2;
+	color:#991b1b;
 }
 
 .room h3{
@@ -356,6 +387,11 @@ nav a:hover{
 
 .room button:hover{
 	background:#d97706;
+}
+
+.room button:disabled{
+	background:#9ca3af;
+	cursor:not-allowed;
 }
 
 .gallery{
@@ -885,38 +921,223 @@ const reviews = [
 	}
 ];
 
-const bookingStorageKey = "anhtho_booking_records";
+const localSnapshotKey = "anhtho_inventory_snapshot";
+const defaultRooms = [
+	{
+		key: "standard",
+		name: "Phòng Tiêu chuẩn",
+		type: "1-2 khách",
+		price: 280000,
+		note: "Phù hợp khách đi công tác hoặc lưu trú ngắn ngày cần chi phí hợp lý.",
+		image: "https://images.unsplash.com/photo-1505693416388-ac5ce068fe85?w=1200",
+		amenities: ["Wifi miễn phí", "Máy lạnh", "Nước nóng"],
+		available: 5,
+		total: 5
+	},
+	{
+		key: "family",
+		name: "Phòng Gia đình",
+		type: "3-4 khách",
+		price: 420000,
+		note: "Không gian rộng hơn, thích hợp cho gia đình nhỏ hoặc nhóm bạn đi cùng nhau.",
+		image: "https://images.unsplash.com/photo-1560184897-ae75f418493e?w=1200",
+		amenities: ["Giường lớn", "Bàn làm việc", "Khu ngồi nghỉ"],
+		available: 5,
+		total: 5
+	},
+	{
+		key: "vip",
+		name: "Phòng Cao cấp",
+		type: "2 khách",
+		price: 560000,
+		note: "Tối ưu cho khách muốn trải nghiệm thoải mái hơn với nội thất hài hòa.",
+		image: "https://images.unsplash.com/photo-1512917774080-9991f1c4c750?w=1200",
+		amenities: ["Không gian riêng tư", "Trang bị tốt hơn", "View thoáng"],
+		available: 5,
+		total: 5
+	}
+];
 
-function loadBookingRecords(){
+let roomState = cloneRooms(defaultRooms);
+let bookingState = [];
+let selectedRoomKey = "";
+let realtimeConnected = false;
+let websocket = null;
+
+function cloneRooms(roomsList){
+	return roomsList.map((room) => ({
+		...room,
+		amenities: [...room.amenities]
+	}));
+}
+
+function loadLocalSnapshot(){
 	try{
-		const raw = localStorage.getItem(bookingStorageKey);
-		const records = raw ? JSON.parse(raw) : [];
-		return Array.isArray(records) ? records : [];
+		const raw = localStorage.getItem(localSnapshotKey);
+		if(!raw){
+			return null;
+		}
+
+		const snapshot = JSON.parse(raw);
+		if(!snapshot || !Array.isArray(snapshot.rooms) || !Array.isArray(snapshot.bookings)){
+			return null;
+		}
+
+		return snapshot;
 	}catch(error){
-		return [];
+		return null;
 	}
 }
 
-function saveBookingRecords(records){
-	localStorage.setItem(bookingStorageKey, JSON.stringify(records));
+function saveLocalSnapshot(){
+	localStorage.setItem(localSnapshotKey, JSON.stringify({
+		rooms: roomState,
+		bookings: bookingState
+	}));
+}
+
+function normalizeRoom(room){
+	return {
+		...room,
+		amenities: Array.isArray(room.amenities) ? [...room.amenities] : [],
+		available: Number.isFinite(room.available) ? room.available : 0,
+		total: Number.isFinite(room.total) ? room.total : Number.isFinite(room.available) ? room.available : 0
+	};
 }
 
 function formatBookingSummary(record){
-	return `${record.name} - ${record.room} - ${record.total.toLocaleString("vi-VN")} đ`;
+	return `${record.name} - ${record.roomName} - ${record.total.toLocaleString("vi-VN")} đ`;
+}
+
+function roomStockLabel(room){
+	if(room.available <= 0){
+		return { text: "Hết phòng", className: "empty" };
+	}
+
+	if(room.available <= 1){
+		return { text: `Số lượng: ${room.available}`, className: "low" };
+	}
+
+	return { text: `Số lượng: ${room.available}`, className: "" };
 }
 
 function renderBookingRecords(){
-	const records = loadBookingRecords();
 	const bookingCount = document.getElementById("bookingCount");
 	const bookingRecords = document.getElementById("bookingRecords");
 
-	bookingCount.textContent = records.length
-		? `Đã lưu ${records.length} bản ghi đặt phòng trong trình duyệt này.`
-		: "Chưa có bản ghi nào được lưu.";
+	bookingCount.textContent = bookingState.length
+		? realtimeConnected
+			? `Đang đồng bộ thời gian thực. Hiện có ${bookingState.length} bản ghi đặt phòng trong database dùng chung.`
+			: `Đang ở chế độ cục bộ. Hiện có ${bookingState.length} bản ghi đặt phòng trong trình duyệt này.`
+		: realtimeConnected
+			? "Chưa có bản ghi nào trong database dùng chung."
+			: "Chưa có bản ghi nào được lưu cục bộ.";
 
-	bookingRecords.innerHTML = records.length
-		? records.slice(0, 5).map((record) => `<li>${formatBookingSummary(record)}</li>`).join("")
+	bookingRecords.innerHTML = bookingState.length
+		? bookingState.slice(0, 5).map((record) => `<li>${formatBookingSummary(record)}</li>`).join("")
 		: "<li>Danh sách sẽ hiển thị sau khi khách xác nhận đặt phòng.</li>";
+}
+
+function renderRooms(){
+	const roomList = document.getElementById("roomList");
+	const roomPrices = Object.fromEntries(roomState.map((room) => [room.key, room.price]));
+
+	window.roomPrices = roomPrices;
+
+	roomList.innerHTML = roomState.map((room) => {
+		const stock = roomStockLabel(room);
+		return `
+	<article class="room">
+		<img src="${room.image}" alt="${room.name}">
+		<div class="room-body">
+			<div class="room-meta">
+				<span class="pill">${room.type}</span>
+				<span class="room-stock ${stock.className}">${stock.text}</span>
+			</div>
+			<h3>${room.name}</h3>
+			<p>${room.note}</p>
+			<ul>
+				${room.amenities.map((amenity) => `<li>• ${amenity}</li>`).join("")}
+			</ul>
+			<div class="price">${room.price.toLocaleString("vi-VN")} đ/đêm</div>
+			<button ${room.available <= 0 ? "disabled" : ""} onclick="chooseRoom('${room.key}')">${room.available <= 0 ? "Hết phòng" : "Đặt phòng"}</button>
+		</div>
+	</article>`;
+	}).join("");
+}
+
+function applyInventorySnapshot(snapshot, options = {}){
+	roomState = cloneRooms((snapshot.rooms || []).map(normalizeRoom));
+	bookingState = Array.isArray(snapshot.bookings) ? [...snapshot.bookings] : [];
+	realtimeConnected = Boolean(options.realtime ?? realtimeConnected);
+	renderRooms();
+	renderBookingRecords();
+	saveLocalSnapshot();
+	if(selectedRoomKey){
+		updateSelectedRoomField();
+		calculatePrice();
+	}
+}
+
+function updateSelectedRoomField(){
+	const selectedRoom = roomState.find((room) => room.key === selectedRoomKey);
+	document.getElementById("selectedRoom").value = selectedRoom ? selectedRoom.name : "";
+}
+
+async function loadInventory(){
+	const localSnapshot = loadLocalSnapshot();
+	if(localSnapshot){
+		applyInventorySnapshot(localSnapshot);
+	}
+
+	try{
+		const response = await fetch("/api/rooms", { cache: "no-store" });
+		if(!response.ok){
+			throw new Error("Failed to fetch inventory");
+		}
+
+		const snapshot = await response.json();
+		applyInventorySnapshot(snapshot, { realtime: true });
+		connectRealtime();
+	}catch(error){
+		if(!localSnapshot){
+			applyInventorySnapshot({ rooms: defaultRooms, bookings: [] });
+		}
+	}
+}
+
+function connectRealtime(){
+	if(realtimeConnected || websocket){
+		return;
+	}
+
+	const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
+	websocket = new WebSocket(`${wsProtocol}//${location.host}/api/ws`);
+
+	websocket.onmessage = (event) => {
+		try{
+			const message = JSON.parse(event.data);
+			if(message.type === "snapshot"){
+				applyInventorySnapshot(message, { realtime: true });
+			}
+		}catch(error){
+			return;
+		}
+	};
+
+	websocket.onopen = () => {
+		realtimeConnected = true;
+	};
+
+	websocket.onclose = () => {
+		realtimeConnected = false;
+		websocket = null;
+		setTimeout(connectRealtime, 4000);
+	};
+
+	websocket.onerror = () => {
+		realtimeConnected = false;
+	};
 }
 
 const statsContainer = document.getElementById("stats");
@@ -932,23 +1153,6 @@ featuresContainer.innerHTML = features.map((item) => `
 	<article class="feature">
 		<h3>${item.title}</h3>
 		<p>${item.description}</p>
-	</article>
-`).join("");
-
-const roomList = document.getElementById("roomList");
-roomList.innerHTML = rooms.map((room) => `
-	<article class="room">
-		<img src="${room.image}" alt="${room.name}">
-		<div class="room-body">
-			<span class="pill">${room.type}</span>
-			<h3>${room.name}</h3>
-			<p>${room.note}</p>
-			<ul>
-				${room.amenities.map((amenity) => `<li>• ${amenity}</li>`).join("")}
-			</ul>
-			<div class="price">${room.price.toLocaleString("vi-VN")} đ/đêm</div>
-			<button onclick="chooseRoom('${room.name}')">Đặt phòng</button>
-		</div>
 	</article>
 `).join("");
 
@@ -974,17 +1178,18 @@ reviewsContainer.innerHTML = reviews.map((item) => `
 	</article>
 `).join("");
 
-const roomPrices = Object.fromEntries(rooms.map((room) => [room.name, room.price]));
+window.chooseRoom = chooseRoom;
 
-function chooseRoom(roomName){
-	document.getElementById("selectedRoom").value = roomName;
+function chooseRoom(roomKey){
+	selectedRoomKey = roomKey;
+	updateSelectedRoomField();
 	document.getElementById("booking").scrollIntoView({ behavior: "smooth" });
 	calculatePrice();
 	updateStayNote();
 }
 
 function calculatePrice(){
-	const room = document.getElementById("selectedRoom").value;
+	const room = roomState.find((item) => item.key === selectedRoomKey);
 	const checkin = document.getElementById("checkinDate").value;
 	const checkout = document.getElementById("checkoutDate").value;
 
@@ -1001,7 +1206,7 @@ function calculatePrice(){
 	}
 
 	const days = Math.ceil((end - start) / (1000 * 60 * 60 * 24));
-	const total = days * roomPrices[room];
+	const total = days * room.price;
 
 	document.getElementById("totalPrice").textContent = `Tổng tiền: ${total.toLocaleString("vi-VN")} đ (${days} đêm)`;
 	return { days, total };
@@ -1020,7 +1225,7 @@ function updateStayNote(){
 }
 
 function submitBooking(){
-	const room = document.getElementById("selectedRoom").value;
+	const room = roomState.find((item) => item.key === selectedRoomKey);
 	const name = document.getElementById("fullname").value;
 	const phone = document.getElementById("phone").value;
 	const checkin = document.getElementById("checkinDate").value;
@@ -1045,36 +1250,78 @@ function submitBooking(){
 		return;
 	}
 
-	const records = loadBookingRecords();
-	records.unshift({
-		room,
+	const payload = {
+		roomKey: room.key,
 		name,
 		phone,
 		checkin,
 		checkout,
 		stayType,
-		note,
-		total: bookingPrice.total,
-		days: bookingPrice.days,
-		createdAt: new Date().toISOString()
-	});
-	saveBookingRecords(records.slice(0, 20));
-	renderBookingRecords();
+		note
+	};
 
-	alert(
-		"ĐẶT PHÒNG THÀNH CÔNG!\n\n" +
-		"Khách hàng: " + name + "\n" +
-		"SĐT: " + phone + "\n" +
-		"Phòng: " + room + "\n" +
-		"Loại lưu trú: " + stayType + "\n" +
-		"Ngày nhận: " + checkin + "\n" +
-		"Ngày trả: " + checkout + "\n" +
-		"Ghi chú: " + note + "\n" +
-		"Tổng tiền: " + bookingPrice.total.toLocaleString("vi-VN") + " đ"
-	);
+	if(!realtimeConnected){
+		bookingState.unshift({
+			roomName: room.name,
+			name,
+			phone,
+			checkin,
+			checkout,
+			stayType,
+			note,
+			total: bookingPrice.total,
+			days: bookingPrice.days,
+			createdAt: new Date().toISOString()
+		});
+		room.available = Math.max(0, room.available - 1);
+		renderRooms();
+		renderBookingRecords();
+		saveLocalSnapshot();
+		alert(
+			"ĐẶT PHÒNG THÀNH CÔNG!\n\n" +
+			"Khách hàng: " + name + "\n" +
+			"SĐT: " + phone + "\n" +
+			"Phòng: " + room.name + "\n" +
+			"Loại lưu trú: " + stayType + "\n" +
+			"Ngày nhận: " + checkin + "\n" +
+			"Ngày trả: " + checkout + "\n" +
+			"Ghi chú: " + note + "\n" +
+			"Tổng tiền: " + bookingPrice.total.toLocaleString("vi-VN") + " đ"
+		);
+		return;
+	}
+
+	fetch("/api/bookings", {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json"
+		},
+		body: JSON.stringify(payload)
+	})
+		.then(async (response) => {
+			const data = await response.json();
+			if(!response.ok){
+				throw new Error(data?.error || "Không thể đặt phòng");
+			}
+			applyInventorySnapshot(data, { realtime: true });
+			alert(
+				"ĐẶT PHÒNG THÀNH CÔNG!\n\n" +
+				"Khách hàng: " + name + "\n" +
+				"SĐT: " + phone + "\n" +
+				"Phòng: " + room.name + "\n" +
+				"Loại lưu trú: " + stayType + "\n" +
+				"Ngày nhận: " + checkin + "\n" +
+				"Ngày trả: " + checkout + "\n" +
+				"Ghi chú: " + note + "\n" +
+				"Tổng tiền: " + bookingPrice.total.toLocaleString("vi-VN") + " đ"
+			);
+		})
+		.catch((error) => {
+			alert(error.message || "Không thể kết nối database realtime.");
+		});
 }
 
-renderBookingRecords();
+loadInventory();
 updateStayNote();
 </script>
 
